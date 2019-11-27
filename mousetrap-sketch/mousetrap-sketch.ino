@@ -3,16 +3,19 @@
 #include <ArduinoOTA.h>
 #include <EEPROM.h>
 
-const char* ssid     = "*******";
-const char* password = "********";
+// this block needs to move into EEPROM to be configurable
+const char *ssid     = "*****";
+const char *password = "*****";
 const char *host = "maker.ifttt.com";
+const char *myTrapName = "under stove";
+// this block needs to move into EEPROM to be configurable
 
 const int led = 2;
-const int trapPin = 12;
+const int trapPin = D6;
 const byte validHeader[] = {0xd, 0xe, 0xa, 0xd, 0xb, 0xe, 0xe, 0xf};
 const int hasFiredOffset = sizeof(validHeader);
 
-bool otaMode = false;
+bool stayAwake = false;
 long count = 0;
 
 // enable a2d converter for cheap battery strength measurement
@@ -20,10 +23,10 @@ ADC_MODE(ADC_VCC);
 
 void maybeInitializeEEPROM()
 {
-  bool failed = false;
+  bool notConsistent = false;
   EEPROM.begin(512);
   
-  for (int i=0;i<8;i++)
+  for (int i=0; i < 8; i++)
   {
     if (validHeader[i] != EEPROM.read(i))
     {
@@ -32,11 +35,12 @@ void maybeInitializeEEPROM()
       Serial.print(" - ");
       Serial.println(EEPROM.read(i));
       EEPROM.write(i, validHeader[i]);
-      failed = true;
+      notConsistent = true;
     }
   }
-  if (failed)
+  if (notConsistent)
   {
+    // default to true so if switch is open during initial configuration no notification is set
     EEPROM.write(hasFiredOffset, true);
     EEPROM.commit();
     Serial.print("eeprom was initialized from ground zero");
@@ -45,7 +49,6 @@ void maybeInitializeEEPROM()
 
 void blinkMe(const int count, const int pause = 1000) 
 {
-    Serial.println("blinking");
     for (int i = 0; i < count ; i++)
     {
       pinMode(led, OUTPUT);
@@ -62,13 +65,13 @@ void blinkMe(const int count, const int pause = 1000)
 
 void sendNotification(const char *trapName, const int batteryLevel)
 {
-  Serial.print("connecting to ");
-  Serial.println(host);
-
   HTTPClient http;
   http.begin("http://maker.ifttt.com/trigger/mousetrap/with/key/bS8xx9j60e0wIHkgrPE-IE");
   http.addHeader("Content-type", "application/json");
   char postString[64];
+
+  Serial.print("sending magic URL to ");
+  Serial.println(host);
   sprintf(postString, "{ \"value1\" : \"%s\", \"value2\" : \"%d\"}", trapName, batteryLevel);
   int httpCode = http.POST(postString);
   String payload = http.getString();
@@ -77,7 +80,7 @@ void sendNotification(const char *trapName, const int batteryLevel)
   Serial.println(payload);
 
   http.end();
-  
+
   Serial.println();
   Serial.println("closing connection");
 
@@ -115,7 +118,7 @@ void enableOTA()
   });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
     Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
-    if ((progress / total) % 10 == 0)
+    if ((progress / total) % 20 == 0)
     {
       if (digitalRead(led) == HIGH)
       {
@@ -136,19 +139,8 @@ void enableOTA()
     else if (error == OTA_END_ERROR) Serial.println("End Failed");
   });
   ArduinoOTA.begin();
-  otaMode = true;
+  stayAwake = true;
 }
-
-#ifdef WIFIOFF_SNIPEHUNT
-void preinit() 
-{
-  // Global WiFi constructors are not called yet
-  // (global class instances like WiFi, Serial... are not yet initialized)..
-  // No global object methods or C++ exceptions can be called in here!
-  //The below is a static class method, which is similar to a function, so it's ok.
-  ESP8266WiFiClass::preinitWiFiOff();
-}
-#endif
 
 void connectWifi()
 {
@@ -160,10 +152,10 @@ void connectWifi()
   Serial.println();
   Serial.print("Connecting to ");
   Serial.println(ssid);
-  
+
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-  
+
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
@@ -193,9 +185,9 @@ void measureAndReport()
 
   // if batteryLevel gets below 2870 ? send help signal
   
-  // already fired but is armed again
   if (hasFired)
   {
+    // already fired but is armed again
     if (pinState == LOW)
     {
       Serial.println("rearming");
@@ -206,10 +198,11 @@ void measureAndReport()
   }
   else
   {
+    // has trap fired now?
     if (pinState == HIGH)
     {
       connectWifi();
-      sendNotification("under stove", batteryLevel);
+      sendNotification(myTrapName, batteryLevel);
       WiFi.disconnect();
       hasFired = true;
     }
@@ -230,10 +223,10 @@ void setup()
   Serial.println("starting up");
   pinMode(D0, WAKEUP_PULLUP);
   
-  // check if button pressed for < 1s; if so, turn on wifi and OTA for 120s
   pinMode(0, INPUT_PULLUP);
   delay(1000);
   
+  // check if button pressed for > 1s; if so, turn on wifi and OTA for 120s
   if (digitalRead(0) == LOW)
   {
     Serial.println("button pressed at startup - going into OTA mode");
@@ -242,7 +235,7 @@ void setup()
     enableOTA();
     blinkMe(5, 150);
   }
-  // if button pressed longer than 5s, go into configure mode and advertise self
+  // if button pressed longer than 5s, go into configure mode and advertise self - not done yet
 }
 
 void loop()
@@ -250,19 +243,21 @@ void loop()
   maybeInitializeEEPROM();
   measureAndReport();
 
-  if (!otaMode)
+  if (!stayAwake)
   {
-  // do i need to disable ADC?  or the modem?
-  // WiFi.mode(WIFI_OFF);
-  // WiFi.forceSleepBegin();
-  // https://github.com/esp8266/Arduino/issues/644
-  //pinMode(16, WAKEUP_PULLUP);
+    // do i need to disable ADC?  or the modem?
+    // WiFi.mode(WIFI_OFF);
+    // WiFi.forceSleepBegin();
+    // https://github.com/esp8266/Arduino/issues/644
+    //pinMode(16, WAKEUP_PULLUP);
     ESP.deepSleep(10e6);
   }
   else
   {
     // should set a timer and turn off this mode after 5 minutes
     ArduinoOTA.handle();
+
+    // remind user we are not deep sleeping
     if ((count++ % 10) == 0)
     {
       blinkMe(1,5);
